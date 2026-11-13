@@ -128,7 +128,7 @@ class SupabaseRepository:
         self.conn.table("ocorrencias").delete().eq("id", ocorrencia_id).execute()
 
     # ============================================
-    # DIAS ESPECIAIS
+    # DIAS ESPECIAIS (atualizado)
     # ============================================
 
     def adicionar_dia_especial(self, dados: dict):
@@ -137,15 +137,22 @@ class SupabaseRepository:
         self.conn.table("dias_especiais").insert(dados).execute()
         return dados["id"]
 
-    def listar_dias_especiais(self, ano: Optional[int] = None) -> List[Dict]:
+    def listar_dias_especiais(self, ano: Optional[int] = None,
+                              ato_id: Optional[str] = None) -> List[Dict]:
         query = self.conn.table("dias_especiais").select("*")
         if ano:
             query = query.gte("data", f"{ano}-01-01").lte("data", f"{ano}-12-31")
-        response = query.execute()
+        if ato_id:
+            query = query.eq("ato_normativo_id", ato_id)
+        response = query.order("data").execute()
         return response.data if response.data else []
 
     def remover_dia_especial(self, dia_id: str):
         self.conn.table("dias_especiais").delete().eq("id", dia_id).execute()
+
+    def remover_dias_por_ato(self, ato_id: str):
+        """Remove todos os dias de um ato normativo"""
+        self.conn.table("dias_especiais").delete().eq("ato_normativo_id", ato_id).execute()
 
     # ============================================
     # LOGS
@@ -173,3 +180,60 @@ class SupabaseRepository:
             "trabalhadores_ativos": len(self.listar_trabalhadores(apenas_ativos=True)),
             "total_usuarios": len(self.listar_usuarios()),
         }
+
+    # ============================================
+    # ATOS NORMATIVOS
+    # ============================================
+
+    def adicionar_ato_normativo(self, dados: dict) -> str:
+        if not dados.get("id"):
+            dados["id"] = str(uuid.uuid4())[:8]
+        self.conn.table("atos_normativos").insert(dados).execute()
+        return dados["id"]
+
+    def listar_atos_normativos(self, ano: int = None, apenas_ativos: bool = True) -> List[Dict]:
+        query = self.conn.table("atos_normativos").select("*")
+        if ano:
+            query = query.eq("ano", ano)
+        if apenas_ativos:
+            query = query.eq("ativo", True)
+        response = query.order("created_at", desc=True).execute()
+        return response.data if response.data else []
+
+    def buscar_ato_normativo(self, ato_id: str) -> Optional[Dict]:
+        response = (
+            self.conn.table("atos_normativos")
+            .select("*").eq("id", ato_id).execute()
+        )
+        return response.data[0] if response.data else None
+
+    def desativar_ato_normativo(self, ato_id: str, substituido_por: str = None):
+        campos = {"ativo": False}
+        if substituido_por:
+            campos["substituido_por"] = substituido_por
+        self.conn.table("atos_normativos").update(campos).eq("id", ato_id).execute()
+
+    def upload_pdf_ato(self, arquivo_bytes: bytes, nome_arquivo: str) -> str:
+        """Faz upload do PDF no Storage e retorna URL pública"""
+        import uuid as uuid_lib
+        caminho = f"atos/{uuid_lib.uuid4().hex[:8]}_{nome_arquivo}"
+
+        self.conn.storage.from_("atos-normativos").upload(
+            path=caminho,
+            file=arquivo_bytes,
+            file_options={"content-type": "application/pdf"}
+        )
+
+        # Retorna URL pública
+        url = self.conn.storage.from_("atos-normativos").get_public_url(caminho)
+        return url
+
+    def remover_pdf_ato(self, arquivo_url: str):
+        """Remove PDF do Storage"""
+        try:
+            # Extrai o caminho da URL
+            if "atos-normativos/" in arquivo_url:
+                caminho = arquivo_url.split("atos-normativos/")[-1].split("?")[0]
+                self.conn.storage.from_("atos-normativos").remove([caminho])
+        except Exception as e:
+            print(f"⚠️ Erro ao remover PDF: {e}")

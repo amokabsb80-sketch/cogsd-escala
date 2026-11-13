@@ -174,6 +174,13 @@ def aba_escala():
         todas_celulas.append(None)
     semanas = [todas_celulas[i:i + 7] for i in range(0, len(todas_celulas), 7)]
 
+    # Carrega dias especiais do mês
+    dias_especiais = repo.listar_dias_especiais(ano=ano)
+    dias_especiais_set = {
+        d["data"]: d for d in dias_especiais
+        if d["data"].startswith(f"{ano}-{mes:02d}")
+    }
+
     for semana in semanas:
         cols = st.columns(7)
         for i, dia_info in enumerate(semana):
@@ -185,8 +192,31 @@ def aba_escala():
                 data_str = dia_info['data'].isoformat()
                 escalas_dia = escalas_por_data.get(data_str, [])
 
-                bg = "#fff5f5" if dia_info['is_fim_semana'] else "#f8fbff"
-                border = "#e74c3c" if dia_info['is_fim_semana'] else "#3498db"
+                # Carrega dias especiais do mês (deve estar antes do loop)
+                # (isso já deve estar no código, se não, adicione antes do "for semana in semanas:")
+                # dias_especiais = repo.listar_dias_especiais(ano=ano)
+                # dias_especiais_set = {
+                #     d["data"]: d for d in dias_especiais
+                #     if d["data"].startswith(f"{ano}-{mes:02d}")
+                # }
+
+                data_str_iso = dia_info['data'].isoformat()
+                dia_especial = dias_especiais_set.get(data_str_iso)
+
+                # Cores por tipo
+                if dia_especial:
+                    if dia_especial["tipo"] == "Feriado":
+                        bg = "#e8f5e9"  # verde claro
+                        border = "#4caf50"  # verde
+                    else:  # Ponto Facultativo
+                        bg = "#fff8e1"  # amarelo claro
+                        border = "#ffc107"  # amarelo
+                elif dia_info['is_fim_semana']:
+                    bg = "#fff5f5"
+                    border = "#e74c3c"
+                else:
+                    bg = "#f8fbff"
+                    border = "#3498db"
 
                 card_html = (
                     f'<div style="background:{bg};border-left:4px solid {border};'
@@ -197,6 +227,23 @@ def aba_escala():
                     f'{dia_info["dia_semana_curto"]}</div>'
                 )
 
+                # Descrição do dia especial (texto completo, quebra de linha)
+                if dia_especial and dia_especial.get("descricao"):
+                    card_html += (
+                        f'<div style="color:{border};font-size:0.7em;'
+                        f'font-weight:bold;margin:2px 0;line-height:1.1;'
+                        f'word-wrap:break-word;">'
+                        f'{dia_especial["descricao"]}</div>'
+                    )
+                elif dia_especial:
+                    # Se não tem descrição, mostra só o tipo
+                    card_html += (
+                        f'<div style="color:{border};font-size:0.7em;'
+                        f'font-weight:bold;margin:2px 0;">'
+                        f'{dia_especial["tipo"]}</div>'
+                    )
+
+                # Turnos
                 for e in escalas_dia:
                     trab = trabalhadores_dict.get(e["trabalhador_id"])
                     if trab:
@@ -209,6 +256,12 @@ def aba_escala():
 
                 card_html += '</div>'
                 st.markdown(card_html, unsafe_allow_html=True)
+
+                if dia_especial and dia_especial.get("descricao"):
+                    card_html += (
+                        f'margin:1px 0;font-style:italic;">'
+                        f'{dia_especial["descricao"][:20]}</div>'
+                    )
 
                 # Botões (admin/editor)
                 if is_editor():
@@ -257,6 +310,26 @@ def aba_escala():
                                             repo.remover_escala(e["id"])
                                             st.rerun()
 
+
+
+
+    # Legenda
+    st.markdown("---")
+    st.markdown(
+                    "<div style='display:flex; gap:20px; justify-content:center; "
+                    "font-size:0.85em; color:#555;'>"
+                    "<div><span style='display:inline-block; width:14px; height:14px; "
+                    "background:#4caf50; border-radius:50%; vertical-align:middle; "
+                    "margin-right:6px;'></span>Feriado</div>"
+                    "<div><span style='display:inline-block; width:14px; height:14px; "
+                    "background:#ffc107; border-radius:50%; vertical-align:middle; "
+                    "margin-right:6px;'></span>Ponto Facultativo</div>"
+                    "<div><span style='display:inline-block; width:14px; height:14px; "
+                    "background:#e74c3c; border-radius:50%; vertical-align:middle; "
+                    "margin-right:6px;'></span>Fim de semana</div>"
+                    "</div>",
+                    unsafe_allow_html=True
+                )
 
 # ============================================
 # ABA: TRABALHADORES
@@ -442,28 +515,79 @@ def aba_usuarios():
 def aba_dias_especiais():
     st.markdown("### 📆 Dias Especiais (Feriados / Facultativos)")
 
-    dias = repo.listar_dias_especiais()
+    anos = [2026, 2027, 2028, 2029, 2030]
+    ano = st.selectbox("Ano", anos, key="ano_dias")
+
+    dias = repo.listar_dias_especiais(ano=ano)
 
     if dias:
-        for d in dias:
-            col1, col2 = st.columns([4, 1])
-            with col1:
-                st.markdown(f"**{d['data']}** — {d['tipo']} — {d.get('descricao', '')}")
-            with col2:
-                if is_editor():
-                    if st.button("🗑️", key=f"del_d_{d['id']}"):
-                        repo.remover_dia_especial(d["id"])
-                        st.rerun()
-    else:
-        st.info("Nenhum dia especial cadastrado.")
+        # Ordena por data
+        dias_ordenados = sorted(dias, key=lambda d: d["data"])
 
+        # Agrupa por mês
+        from collections import defaultdict
+        por_mes = defaultdict(list)
+        for d in dias_ordenados:
+            mes = int(d["data"][5:7])
+            por_mes[mes].append(d)
+
+        MESES = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+                 "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+
+        # Renderiza cada mês
+        for mes_num in sorted(por_mes.keys()):
+            mes_nome = MESES[mes_num - 1]
+
+            st.markdown(
+                f"<h4 style='margin-top:20px; margin-bottom:8px; "
+                f"color:#2c3e50;'>{mes_nome}</h4>",
+                unsafe_allow_html=True
+            )
+
+            for d in por_mes[mes_num]:
+                # Formata data dd/mm/aaaa
+                data_fmt = d["data"]  # "2026-01-01"
+                ano_d, mes_d, dia_d = data_fmt.split("-")
+                data_br = f"{dia_d}/{mes_d}/{ano_d}"
+
+                # Busca o ato vinculado
+                ato = repo.buscar_ato_normativo(d.get("ato_normativo_id")) if d.get("ato_normativo_id") else None
+
+                cor_tipo = "#4caf50" if d["tipo"] == "Feriado" else "#f39c12"
+
+                col1, col2 = st.columns([6, 1])
+                with col1:
+                    st.markdown(
+                        f"<div style='margin-left:20px; padding:6px 10px; "
+                        f"border-left:3px solid {cor_tipo}; "
+                        f"background:#f8f9fa; border-radius:4px; margin-bottom:6px;'>"
+                        f"<span style='color:#555; font-family:monospace;'>{data_br}</span> — "
+                        f"<strong style='color:{cor_tipo};'>{d['tipo']}</strong>"
+                        f"{(' — ' + d['descricao']) if d.get('descricao') else ''}"
+                        f"{(' • 📜 ' + ato['titulo']) if ato else ''}"
+                        f"</div>",
+                        unsafe_allow_html=True
+                    )
+                with col2:
+                    if is_editor():
+                        if st.button("🗑️", key=f"del_d_{d['id']}"):
+                            repo.remover_dia_especial(d["id"])
+                            st.rerun()
+    else:
+        st.info(f"Nenhum dia especial cadastrado para {ano}.")
+
+    # Adicionar manualmente (sem mudanças)
     if is_editor():
         st.markdown("---")
         st.markdown("### ➕ Adicionar Dia Especial")
+        st.caption("💡 Para cadastrar em lote via PDF, use a aba '📜 Atos Normativos'.")
+
         with st.form("form_dia"):
             col1, col2 = st.columns(2)
             with col1:
-                data_dia = st.date_input("Data")
+                data_dia = st.date_input("Data",
+                                         min_value=date(ano, 1, 1),
+                                         max_value=date(ano, 12, 31))
             with col2:
                 tipo = st.selectbox("Tipo", ["Feriado", "Ponto Facultativo"])
             descricao = st.text_input("Descrição (opcional)")
@@ -477,7 +601,6 @@ def aba_dias_especiais():
                 repo.adicionar_dia_especial(dados)
                 st.success("✅ Dia especial adicionado!")
                 st.rerun()
-
 
 # ============================================
 # ABA: LOGS (admin)
@@ -560,8 +683,10 @@ def main():
     # Tabs por role
     if is_admin():
         tabs = st.tabs(["📅 Escala", "👥 Trabalhadores", "⚠️ Ocorrências",
-                        "📆 Dias Especiais", "📊 Relatórios", "🔐 Usuários", "📝 Logs"])
-        tab_escala, tab_trab, tab_ocorr, tab_dias, tab_rel, tab_users, tab_logs = tabs
+                        "📆 Dias Especiais", "📜 Atos Normativos",
+                        "📊 Relatórios", "🔐 Usuários", "📝 Logs"])
+        (tab_escala, tab_trab, tab_ocorr, tab_dias,
+         tab_atos, tab_rel, tab_users, tab_logs) = tabs
 
         with tab_escala:
             aba_escala()
@@ -571,6 +696,8 @@ def main():
             st.info("Em breve (Fase 2)")
         with tab_dias:
             aba_dias_especiais()
+        with tab_atos:
+            aba_atos_normativos()
         with tab_rel:
             st.info("Em breve (Fase 3)")
         with tab_users:
@@ -605,6 +732,166 @@ def main():
         with tab_rel:
             st.info("Em breve (Fase 3)")
 
+
+# ============================================
+# ABA: ATOS NORMATIVOS (admin)
+# ============================================
+def aba_atos_normativos():
+    st.markdown("### 📜 Atos Normativos de Dias Especiais")
+    st.info(
+        "Faça upload do PDF do ato normativo (ex: Portaria CNMP-SG nº 35/2026) "
+        "para o ano correspondente. Se houver substituição, o ato anterior "
+        "será desativado automaticamente."
+    )
+
+    # Lista atos existentes
+    anos_disponiveis = [2026, 2027, 2028, 2029, 2030]
+    ano_filtro = st.selectbox("Filtrar por ano", ["Todos"] + anos_disponiveis, key="ano_ato")
+
+    atos = repo.listar_atos_normativos(
+        ano=ano_filtro if ano_filtro != "Todos" else None,
+        apenas_ativos=False
+    )
+
+    if atos:
+        st.markdown("#### Atos cadastrados")
+        for ato in atos:
+            status = "✅ Ativo" if ato.get("ativo") else "❌ Substituído"
+            col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+
+            with col1:
+                st.markdown(
+                    f"**{ato['ano']}** — {ato['titulo']}<br>"
+                    f"<small>{ato.get('descricao', '')}</small>",
+                    unsafe_allow_html=True
+                )
+                if ato.get("arquivo_url"):
+                    st.markdown(f"[📄 Ver PDF]({ato['arquivo_url']})")
+
+            with col2:
+                st.markdown(status)
+
+            with col3:
+                # Contar dias associados
+                dias_ato = repo.listar_dias_especiais(ato_id=ato["id"])
+                st.markdown(f"**{len(dias_ato)} dias**")
+
+            with col4:
+                if ato.get("ativo") and is_admin():
+                    if st.button("🗑️ Remover", key=f"rm_ato_{ato['id']}"):
+                        # Desativa ato
+                        repo.desativar_ato_normativo(ato["id"])
+                        # Remove os dias associados
+                        repo.remover_dias_por_ato(ato["id"])
+                        # Remove PDF
+                        if ato.get("arquivo_url"):
+                            repo.remover_pdf_ato(ato["arquivo_url"])
+                        log.log_delete("atos_normativos", ato["id"], ato)
+                        st.success("Ato removido!")
+                        st.rerun()
+    else:
+        st.info("Nenhum ato normativo cadastrado.")
+
+    if not is_admin():
+        return
+
+    st.markdown("---")
+    st.markdown("### ➕ Adicionar Ato Normativo")
+
+    with st.form("form_ato"):
+        col1, col2 = st.columns(2)
+        with col1:
+            ano = st.selectbox("Ano de referência", anos_disponiveis)
+        with col2:
+            titulo = st.text_input("Título do ato",
+                                   placeholder="Ex: Portaria CNMP-SG nº 35/2026")
+
+        descricao = st.text_area("Descrição (opcional)")
+
+        st.markdown("**Upload do PDF:**")
+        pdf = st.file_uploader("Selecione o PDF", type=["pdf"])
+
+        st.markdown("**Datas especiais** (adicione manualmente):")
+        st.caption("Opcionalmente, você pode adicionar as datas manualmente abaixo.")
+
+        # Permite adicionar N datas
+        num_datas = st.number_input("Quantas datas adicionar?",
+                                    min_value=0, max_value=50, value=0)
+
+        # Cria campos dinâmicos
+        datas_input = []
+        for i in range(int(num_datas)):
+            st.markdown(f"**Data {i + 1}:**")
+            col_d, col_t, col_desc = st.columns([2, 2, 3])
+            with col_d:
+                d = st.date_input(f"Data {i + 1}", key=f"data_{i}",
+                                  min_value=date(ano, 1, 1),
+                                  max_value=date(ano, 12, 31))
+            with col_t:
+                t = st.selectbox(f"Tipo {i + 1}",
+                                 ["Feriado", "Ponto Facultativo"],
+                                 key=f"tipo_{i}")
+            with col_desc:
+                desc = st.text_input(f"Descrição {i + 1}", key=f"desc_{i}")
+            datas_input.append((d, t, desc))
+
+        if st.form_submit_button("Salvar ato normativo"):
+            if not titulo:
+                st.error("Título é obrigatório!")
+            else:
+                # Verifica se já existe ato ativo para o ano
+                atos_ano = repo.listar_atos_normativos(ano=ano, apenas_ativos=True)
+                substituiu = None
+
+                if atos_ano:
+                    st.warning(
+                        f"⚠️ Já existe ato ativo para {ano}. "
+                        f"O ato anterior será desativado automaticamente."
+                    )
+
+                # Upload do PDF
+                arquivo_url = None
+                if pdf:
+                    try:
+                        arquivo_url = repo.upload_pdf_ato(pdf.read(), pdf.name)
+                    except Exception as e:
+                        st.error(f"Erro no upload: {e}")
+
+                # Cria o ato
+                dados_ato = {
+                    "ano": ano,
+                    "titulo": titulo,
+                    "descricao": descricao,
+                    "arquivo_nome": pdf.name if pdf else None,
+                    "arquivo_url": arquivo_url,
+                    "ativo": True,
+                    "created_by": get_usuario_logado().get("email", ""),
+                }
+                ato_id = repo.adicionar_ato_normativo(dados_ato)
+                log.log_insert("atos_normativos", ato_id, dados_ato)
+
+                # Desativa atos anteriores
+                if atos_ano:
+                    for ato_ant in atos_ano:
+                        repo.desativar_ato_normativo(ato_ant["id"], substituido_por=ato_id)
+                        log.log_update("atos_normativos", ato_ant["id"],
+                                       ato_ant, {**ato_ant, "ativo": False})
+
+                # Adiciona as datas
+                for d, t, desc in datas_input:
+                    dados_dia = {
+                        "data": d.isoformat(),
+                        "tipo": t,
+                        "descricao": desc,
+                        "ato_normativo_id": ato_id,
+                    }
+                    repo.adicionar_dia_especial(dados_dia)
+
+                st.success(
+                    f"✅ Ato normativo salvo! "
+                    f"{len(datas_input)} datas adicionadas."
+                )
+                st.rerun()
 
 if __name__ == "__main__":
     main()
