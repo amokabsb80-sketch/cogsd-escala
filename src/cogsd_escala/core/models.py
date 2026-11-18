@@ -13,12 +13,13 @@ class Trabalhador:
     nome: str
     email: str
     cargo: Optional[str] = None
+    setor: Optional[str] = None
     is_chefia: bool = False
     turno_preferencia: Optional[str] = None  # Manhã, Tarde, Diurno
     regime_trabalho: str = "presencial"       # presencial, hibrido, remoto
     excecao_art12: bool = False               # True = não conta no limite 50%
     ativo: bool = True
-
+    cor: str = "#3498db"
 
 @dataclass
 class Usuario:

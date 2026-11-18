@@ -36,6 +36,74 @@ repo = get_repo()
 log = LogService(repo)
 
 # ============================================
+# CACHE DE LEITURA
+# ============================================
+@st.cache_data(ttl=None)
+def get_trabalhadores(apenas_ativos=False):
+    return repo.listar_trabalhadores(apenas_ativos=apenas_ativos)
+
+
+@st.cache_data(ttl=None)
+def get_usuarios():
+    return repo.listar_usuarios()
+
+
+@st.cache_data(ttl=None)
+def get_escalas_mes(ano, mes):
+    return repo.listar_escalas_do_mes(ano, mes)
+
+
+@st.cache_data(ttl=None)
+def get_dias_especiais(ano):
+    return repo.listar_dias_especiais(ano=ano)
+
+
+@st.cache_data(ttl=None)
+def get_atos_normativos(ano=None, apenas_ativos=True):
+    return repo.listar_atos_normativos(ano=ano, apenas_ativos=apenas_ativos)
+
+
+def limpar_cache():
+    """Limpa todo o cache de leitura"""
+    st.cache_data.clear()
+
+
+# ============================================
+# LOG ASSÍNCRONO (FILA)
+# ============================================
+def log_async(acao: str, entidade: str, entidade_id=None,
+              dados_anteriores=None, dados_novos=None):
+    """Adiciona log à fila (processado no próximo rerun)"""
+    if "log_queue" not in st.session_state:
+        st.session_state["log_queue"] = []
+    st.session_state["log_queue"].append({
+        "acao": acao,
+        "entidade": entidade,
+        "entidade_id": entidade_id,
+        "dados_anteriores": dados_anteriores,
+        "dados_novos": dados_novos,
+    })
+
+
+def processar_logs_pendentes():
+    """Processa logs pendentes em lote"""
+    if "log_queue" not in st.session_state:
+        return
+    fila = st.session_state["log_queue"]
+    if not fila:
+        return
+    for item in fila:
+        try:
+            log.registrar(
+                item["acao"], item["entidade"], item["entidade_id"],
+                item["dados_anteriores"], item["dados_novos"]
+            )
+        except Exception:
+            pass
+    st.session_state["log_queue"] = []
+
+
+# ============================================
 # CSS
 # ============================================
 st.markdown("""
@@ -79,7 +147,6 @@ def tela_login():
                     elif not verificar_senha(senha, usuario["senha_hash"]):
                         st.error("❌ Senha incorreta")
                     else:
-                        # Login OK
                         fazer_login(usuario)
                         log.log_login(email)
                         repo.atualizar_usuario(usuario["id"],
@@ -141,8 +208,14 @@ def aba_escala():
         mes = [m[0] for m in meses if m[1] == mes_nome][0]
 
     # Carrega dados do mês
-    escalas_mes = repo.listar_escalas_do_mes(ano, mes)
-    trabalhadores_dict = {t["id"]: t for t in repo.listar_trabalhadores(apenas_ativos=True)}
+    escalas_mes = get_escalas_mes(ano, mes)
+    trabalhadores_dict = {t["id"]: t for t in get_trabalhadores(apenas_ativos=True)}
+    dias_especiais = get_dias_especiais(ano)
+
+    dias_especiais_set = {
+        d["data"]: d for d in dias_especiais
+        if d["data"].startswith(f"{ano}-{mes:02d}")
+    }
 
     # Agrupa escalas por data
     escalas_por_data = {}
@@ -174,13 +247,6 @@ def aba_escala():
         todas_celulas.append(None)
     semanas = [todas_celulas[i:i + 7] for i in range(0, len(todas_celulas), 7)]
 
-    # Carrega dias especiais do mês
-    dias_especiais = repo.listar_dias_especiais(ano=ano)
-    dias_especiais_set = {
-        d["data"]: d for d in dias_especiais
-        if d["data"].startswith(f"{ano}-{mes:02d}")
-    }
-
     for semana in semanas:
         cols = st.columns(7)
         for i, dia_info in enumerate(semana):
@@ -192,31 +258,23 @@ def aba_escala():
                 data_str = dia_info['data'].isoformat()
                 escalas_dia = escalas_por_data.get(data_str, [])
 
-                # Carrega dias especiais do mês (deve estar antes do loop)
-                # (isso já deve estar no código, se não, adicione antes do "for semana in semanas:")
-                # dias_especiais = repo.listar_dias_especiais(ano=ano)
-                # dias_especiais_set = {
-                #     d["data"]: d for d in dias_especiais
-                #     if d["data"].startswith(f"{ano}-{mes:02d}")
-                # }
-
                 data_str_iso = dia_info['data'].isoformat()
                 dia_especial = dias_especiais_set.get(data_str_iso)
 
-                # Cores por tipo
+                # Cores por tipo de dia
                 if dia_especial:
                     if dia_especial["tipo"] == "Feriado":
-                        bg = "#e8f5e9"  # verde claro
-                        border = "#4caf50"  # verde
-                    else:  # Ponto Facultativo
-                        bg = "#fff8e1"  # amarelo claro
-                        border = "#ffc107"  # amarelo
+                        bg = "#e8f5e9"
+                        border = "#4caf50"
+                    else:
+                        bg = "#fff8e1"
+                        border = "#ffc107"
                 elif dia_info['is_fim_semana']:
                     bg = "#fff5f5"
                     border = "#e74c3c"
                 else:
-                    bg = "#f8fbff"
-                    border = "#3498db"
+                    bg = "#ffffff"
+                    border = "#bdc3c7"
 
                 card_html = (
                     f'<div style="background:{bg};border-left:4px solid {border};'
@@ -227,7 +285,7 @@ def aba_escala():
                     f'{dia_info["dia_semana_curto"]}</div>'
                 )
 
-                # Descrição do dia especial (texto completo, quebra de linha)
+                # Descrição do dia especial
                 if dia_especial and dia_especial.get("descricao"):
                     card_html += (
                         f'<div style="color:{border};font-size:0.7em;'
@@ -236,7 +294,6 @@ def aba_escala():
                         f'{dia_especial["descricao"]}</div>'
                     )
                 elif dia_especial:
-                    # Se não tem descrição, mostra só o tipo
                     card_html += (
                         f'<div style="color:{border};font-size:0.7em;'
                         f'font-weight:bold;margin:2px 0;">'
@@ -248,20 +305,15 @@ def aba_escala():
                     trab = trabalhadores_dict.get(e["trabalhador_id"])
                     if trab:
                         turno_txt = e.get("turno") or "Diurno"
+                        cor_trab = trab.get("cor", "#3498db")
                         card_html += (
-                            f'<div style="background:#3498db;color:white;'
+                            f'<div style="background:{cor_trab};color:white;'
                             f'border-radius:5px;padding:3px 6px;margin:2px 0;'
                             f'font-size:0.7em;">{trab["nome"][:15]} ({turno_txt[:7]})</div>'
                         )
 
                 card_html += '</div>'
                 st.markdown(card_html, unsafe_allow_html=True)
-
-                if dia_especial and dia_especial.get("descricao"):
-                    card_html += (
-                        f'margin:1px 0;font-style:italic;">'
-                        f'{dia_especial["descricao"][:20]}</div>'
-                    )
 
                 # Botões (admin/editor)
                 if is_editor():
@@ -276,11 +328,8 @@ def aba_escala():
 
                                 turnos_opcoes = ["Manhã", "Tarde", "Diurno"]
                                 turno = st.selectbox("Turno", turnos_opcoes, key=f"turno_{data_str}")
-                                regime = st.selectbox("Regime", ["presencial", "hibrido", "remoto"],
-                                                      key=f"regime_{data_str}")
 
                                 if st.button("Confirmar", key=f"btn_add_{data_str}"):
-                                    # Verifica se já existe
                                     existe = any(e["trabalhador_id"] == trab_id for e in escalas_dia)
                                     if existe:
                                         st.error("Já está escalado neste dia!")
@@ -289,10 +338,11 @@ def aba_escala():
                                             "data": data_str,
                                             "trabalhador_id": trab_id,
                                             "turno": None if turno == "Diurno" else turno,
-                                            "regime": regime,
+                                            "regime": "presencial",
                                         }
                                         novo_id = repo.adicionar_escala(dados)
-                                        log.log_insert("escalas", novo_id, dados)
+                                        log_async("INSERT", "escalas", novo_id, dados_novos=dados)
+                                        get_escalas_mes.clear()
                                         st.success("✅ Adicionado!")
                                         st.rerun()
                             else:
@@ -306,30 +356,29 @@ def aba_escala():
                                     trab = trabalhadores_dict.get(e["trabalhador_id"])
                                     if trab:
                                         if st.button(f"❌ {trab['nome']}", key=f"rm_{e['id']}"):
-                                            log.log_delete("escalas", e["id"], e)
+                                            log_async("DELETE", "escalas", e["id"], dados_anteriores=e)
                                             repo.remover_escala(e["id"])
+                                            get_escalas_mes.clear()
                                             st.rerun()
-
-
-
 
     # Legenda
     st.markdown("---")
     st.markdown(
-                    "<div style='display:flex; gap:20px; justify-content:center; "
-                    "font-size:0.85em; color:#555;'>"
-                    "<div><span style='display:inline-block; width:14px; height:14px; "
-                    "background:#4caf50; border-radius:50%; vertical-align:middle; "
-                    "margin-right:6px;'></span>Feriado</div>"
-                    "<div><span style='display:inline-block; width:14px; height:14px; "
-                    "background:#ffc107; border-radius:50%; vertical-align:middle; "
-                    "margin-right:6px;'></span>Ponto Facultativo</div>"
-                    "<div><span style='display:inline-block; width:14px; height:14px; "
-                    "background:#e74c3c; border-radius:50%; vertical-align:middle; "
-                    "margin-right:6px;'></span>Fim de semana</div>"
-                    "</div>",
-                    unsafe_allow_html=True
-                )
+        "<div style='display:flex; gap:20px; justify-content:center; "
+        "font-size:0.85em; color:#555;'>"
+        "<div><span style='display:inline-block; width:14px; height:14px; "
+        "background:#4caf50; border-radius:50%; vertical-align:middle; "
+        "margin-right:6px;'></span>Feriado</div>"
+        "<div><span style='display:inline-block; width:14px; height:14px; "
+        "background:#ffc107; border-radius:50%; vertical-align:middle; "
+        "margin-right:6px;'></span>Ponto Facultativo</div>"
+        "<div><span style='display:inline-block; width:14px; height:14px; "
+        "background:#e74c3c; border-radius:50%; vertical-align:middle; "
+        "margin-right:6px;'></span>Fim de semana</div>"
+        "</div>",
+        unsafe_allow_html=True
+    )
+
 
 # ============================================
 # ABA: TRABALHADORES
@@ -337,37 +386,129 @@ def aba_escala():
 def aba_trabalhadores():
     st.markdown("### 👥 Trabalhadores")
 
-    trabalhadores = repo.listar_trabalhadores()
+    trabalhadores = get_trabalhadores()
+
+    if "editando_trabalhador" not in st.session_state:
+        st.session_state["editando_trabalhador"] = None
 
     if trabalhadores:
         for t in trabalhadores:
-            col1, col2, col3, col4 = st.columns([4, 1, 1, 1])
+            # Modo edição
+            if st.session_state["editando_trabalhador"] == t["id"]:
+                st.markdown(f"#### ✏️ Editando: {t['nome']}")
+                with st.form(f"form_edit_{t['id']}"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        nome = st.text_input("Nome", value=t["nome"], key=f"e_nome_{t['id']}")
+                        email = st.text_input("E-mail", value=t["email"], key=f"e_email_{t['id']}")
+                    with col2:
+                        cargo = st.text_input("Cargo", value=t.get("cargo") or "", key=f"e_cargo_{t['id']}")
+                        setor = st.text_input("Setor", value=t.get("setor") or "", key=f"e_setor_{t['id']}")
+
+                    # Turno e Regime alinhados
+                    col_turno, col_regime = st.columns(2)
+                    with col_turno:
+                        turno_pref = st.selectbox(
+                            "Turno preferência",
+                            ["Manhã", "Tarde", "Diurno"],
+                            index=["Manhã", "Tarde", "Diurno"].index(t.get("turno_preferencia") or "Diurno"),
+                            key=f"e_turno_{t['id']}"
+                        )
+                    with col_regime:
+                        regime = st.selectbox(
+                            "Regime",
+                            ["presencial", "hibrido", "remoto"],
+                            index=["presencial", "hibrido", "remoto"].index(t.get("regime_trabalho") or "presencial"),
+                            key=f"e_regime_{t['id']}"
+                        )
+
+                    # Chefia e Exceção alinhados
+                    col_chefia, col_excecao = st.columns(2)
+                    with col_chefia:
+                        is_chefia = st.checkbox("Cargo de chefia", value=t.get("is_chefia", False),
+                                                key=f"e_chefia_{t['id']}")
+                    with col_excecao:
+                        excecao = st.checkbox("Exceção Art. 12", value=t.get("excecao_art12", False),
+                                              key=f"e_excecao_{t['id']}")
+
+                    cor_edit = st.color_picker(
+                        "Cor do trabalhador",
+                        t.get("cor", "#3498db"),
+                        key=f"e_cor_{t['id']}"
+                    )
+
+                    col_salvar, col_cancelar = st.columns(2)
+                    with col_salvar:
+                        if st.form_submit_button("💾 Salvar", use_container_width=True):
+                            dados_antigos = dict(t)
+                            dados_novos = {
+                                "nome": nome,
+                                "email": email.lower(),
+                                "cargo": cargo or None,
+                                "setor": setor or None,
+                                "turno_preferencia": turno_pref,
+                                "is_chefia": is_chefia,
+                                "regime_trabalho": regime,
+                                "excecao_art12": excecao,
+                                "cor": cor_edit,
+                            }
+                            repo.atualizar_trabalhador(t["id"], **dados_novos)
+                            log_async("UPDATE", "trabalhadores", t["id"],
+                                      dados_anteriores=dados_antigos, dados_novos=dados_novos)
+                            get_trabalhadores.clear()
+                            st.session_state["editando_trabalhador"] = None
+                            st.success("✅ Salvo!")
+                            st.rerun()
+                    with col_cancelar:
+                        if st.form_submit_button("❌ Cancelar", use_container_width=True):
+                            st.session_state["editando_trabalhador"] = None
+                            st.rerun()
+
+                st.markdown("---")
+                continue
+
+            # Modo visualização
+            col1, col2, col3, col4, col5 = st.columns([4, 1, 1, 1, 1])
             with col1:
                 chefia = "👔 " if t.get("is_chefia") else ""
+                cor_trab = t.get("cor", "#3498db")
+                setor_txt = f' • {t.get("setor")}' if t.get("setor") else ''
                 st.markdown(
-                    f'<div class="card" style="border-left-color:#3498db;">'
+                    f'<div class="card" style="border-left-color:{cor_trab};">'
                     f'{chefia}<b>{t["nome"]}</b><br>'
-                    f'<small>{t.get("cargo", "—")} • {t["email"]} • {t.get("turno_preferencia", "—")}</small>'
+                    f'<small>{t.get("cargo", "—")}{setor_txt} • {t["email"]} • {t.get("turno_preferencia", "—")}</small>'
                     f'</div>',
                     unsafe_allow_html=True
                 )
             with col2:
                 st.markdown(f"**{'✅ Ativo' if t.get('ativo') else '❌ Inativo'}**")
             with col3:
+                if st.button("✏️", key=f"edit_t_{t['id']}", help="Editar"):
+                    st.session_state["editando_trabalhador"] = t["id"]
+                    st.rerun()
+            with col4:
                 if t.get("ativo"):
                     if st.button("Desativar", key=f"toggle_t_{t['id']}"):
                         repo.atualizar_trabalhador(t["id"], ativo=False)
-                        log.log_update("trabalhadores", t["id"], t, {**t, "ativo": False})
+                        log_async("UPDATE", "trabalhadores", t["id"],
+                                  dados_anteriores=t, dados_novos={**t, "ativo": False})
+                        get_trabalhadores.clear()
                         st.rerun()
                 else:
                     if st.button("Ativar", key=f"toggle_t_{t['id']}"):
                         repo.atualizar_trabalhador(t["id"], ativo=True)
-                        log.log_update("trabalhadores", t["id"], t, {**t, "ativo": True})
+                        log_async("UPDATE", "trabalhadores", t["id"],
+                                  dados_anteriores=t, dados_novos={**t, "ativo": True})
+                        limpar_cache()
                         st.rerun()
-            with col4:
+            with col5:
                 if st.button("🗑️", key=f"del_t_{t['id']}"):
-                    log.log_delete("trabalhadores", t["id"], t)
+                    for u in get_usuarios():
+                        if u.get("trabalhador_id") == t["id"]:
+                            repo.atualizar_usuario(u["id"], trabalhador_id=None)
+                    log_async("DELETE", "trabalhadores", t["id"], dados_anteriores=t)
                     repo.remover_trabalhador(t["id"])
+                    get_trabalhadores.clear()
                     st.rerun()
     else:
         st.info("Nenhum trabalhador cadastrado.")
@@ -376,38 +517,71 @@ def aba_trabalhadores():
         st.markdown("---")
         st.markdown("### ➕ Adicionar Trabalhador")
 
-        with st.form("form_trabalhador"):
-            nome = st.text_input("Nome")
-            email = st.text_input("E-mail")
-            cargo = st.text_input("Cargo")
-            col1, col2 = st.columns(2)
-            with col1:
-                is_chefia = st.checkbox("Cargo de chefia")
-            with col2:
-                turno_pref = st.selectbox("Turno preferência", ["Manhã", "Tarde", "Diurno"])
+        if "form_trab_counter" not in st.session_state:
+            st.session_state["form_trab_counter"] = 0
 
-            regime = st.selectbox("Regime", ["presencial", "hibrido", "remoto"])
-            excecao = st.checkbox("Exceção Art. 12 (não conta no limite 50%)")
+        form_key = f"form_trabalhador_{st.session_state['form_trab_counter']}"
+
+        with st.form(form_key, clear_on_submit=False):
+            nome_novo = st.text_input("Nome", key=f"nome_{form_key}")
+            email_novo = st.text_input("E-mail", key=f"email_{form_key}")
+
+            # Cargo e Setor alinhados
+            col_cargo, col_setor = st.columns(2)
+            with col_cargo:
+                cargo_novo = st.text_input("Cargo", key=f"cargo_{form_key}")
+            with col_setor:
+                setor_novo = st.text_input("Setor", key=f"setor_{form_key}")
+
+            # Turno e Regime alinhados
+            col_turno, col_regime = st.columns(2)
+            with col_turno:
+                turno_pref_novo = st.selectbox("Turno preferência", ["Manhã", "Tarde", "Diurno"],
+                                               key=f"turno_{form_key}")
+            with col_regime:
+                regime_novo = st.selectbox("Regime", ["presencial", "hibrido", "remoto"],
+                                           key=f"regime_{form_key}")
+
+            # Chefia e Exceção alinhados
+            col_chefia, col_excecao = st.columns(2)
+            with col_chefia:
+                is_chefia_novo = st.checkbox("Cargo de chefia", key=f"chefia_{form_key}")
+            with col_excecao:
+                excecao_novo = st.checkbox("Exceção Art. 12 (não conta no limite 50%)",
+                                           key=f"excecao_{form_key}")
+
+            cor_novo = st.color_picker("Cor do trabalhador", "#3498db", key=f"cor_{form_key}")
 
             if st.form_submit_button("Adicionar"):
-                if nome and email:
+                # Valida ANTES de limpar
+                campos_faltando = []
+                if not nome_novo:
+                    campos_faltando.append("Nome")
+                if not email_novo:
+                    campos_faltando.append("E-mail")
+
+                if campos_faltando:
+                    st.error(f"⚠️ Preencha os campos obrigatórios: {', '.join(campos_faltando)}")
+                else:
                     dados = {
-                        "nome": nome,
-                        "email": email.lower(),
-                        "cargo": cargo or None,
-                        "is_chefia": is_chefia,
-                        "turno_preferencia": turno_pref,
-                        "regime_trabalho": regime,
-                        "excecao_art12": excecao,
+                        "nome": nome_novo,
+                        "email": email_novo.lower(),
+                        "cargo": cargo_novo or None,
+                        "setor": setor_novo or None,
+                        "is_chefia": is_chefia_novo,
+                        "turno_preferencia": turno_pref_novo,
+                        "regime_trabalho": regime_novo,
+                        "excecao_art12": excecao_novo,
                         "ativo": True,
+                        "cor": cor_novo,
                     }
                     novo_id = repo.adicionar_trabalhador(dados)
-                    log.log_insert("trabalhadores", novo_id, dados)
-                    st.success(f"✅ {nome} adicionado!")
+                    log_async("INSERT", "trabalhadores", novo_id, dados_novos=dados)
+                    get_trabalhadores.clear()
+                    # Só incrementa o contador (para limpar) se o cadastro deu certo
+                    st.session_state["form_trab_counter"] += 1
+                    st.success(f"✅ {nome_novo} adicionado!")
                     st.rerun()
-                else:
-                    st.error("Nome e e-mail são obrigatórios!")
-
 
 # ============================================
 # ABA: USUÁRIOS (admin)
@@ -415,8 +589,8 @@ def aba_trabalhadores():
 def aba_usuarios():
     st.markdown("### 🔐 Usuários")
 
-    usuarios = repo.listar_usuarios()
-    trabalhadores = {t["id"]: t for t in repo.listar_trabalhadores()}
+    usuarios = get_usuarios()
+    trabalhadores = {t["id"]: t for t in get_trabalhadores()}
 
     if usuarios:
         for u in usuarios:
@@ -441,48 +615,62 @@ def aba_usuarios():
                 if novo_role != u.get("role"):
                     if st.button("Salvar role", key=f"save_role_{u['id']}"):
                         repo.atualizar_usuario(u["id"], role=novo_role)
-                        log.log_update("usuarios", u["id"], u, {**u, "role": novo_role})
+                        log_async("UPDATE", "usuarios", u["id"],
+                                  dados_anteriores=u, dados_novos={**u, "role": novo_role})
+                        get_usuarios.clear()
                         st.rerun()
             with col3:
                 if u.get("ativo"):
                     if st.button("Desativar", key=f"toggle_u_{u['id']}"):
                         repo.atualizar_usuario(u["id"], ativo=False)
+                        log_async("UPDATE", "usuarios", u["id"],
+                                  dados_anteriores=u, dados_novos={**u, "ativo": False})
+                        get_usuarios.clear()
                         st.rerun()
                 else:
                     if st.button("Ativar", key=f"toggle_u_{u['id']}"):
                         repo.atualizar_usuario(u["id"], ativo=True)
+                        log_async("UPDATE", "usuarios", u["id"],
+                                  dados_anteriores=u, dados_novos={**u, "ativo": True})
+                        get_usuarios.clear()
                         st.rerun()
             with col4:
                 col_reset, col_del = st.columns(2)
                 with col_reset:
-                    if st.button("🔑", key=f"reset_u_{u['id']}",
-                                 help="Resetar senha"):
+                    if st.button("🔑", key=f"reset_u_{u['id']}", help="Resetar senha"):
                         nova_temp = gerar_senha_temporaria()
                         repo.atualizar_usuario(
                             u["id"],
                             senha_hash=gerar_hash_senha(nova_temp),
                             senha_temporaria=True
                         )
-                        log.log_update("usuarios", u["id"], u,
-                                       {**u, "senha_temporaria": True})
+                        log_async("UPDATE", "usuarios", u["id"],
+                                  dados_anteriores=u, dados_novos={**u, "senha_temporaria": True})
+                        get_usuarios.clear()
                         st.success(f"Nova senha: `{nova_temp}`")
                         st.info("Repasse ao usuário. Ele trocará no próximo login.")
                 with col_del:
                     if st.button("🗑️", key=f"del_u_{u['id']}"):
-                        log.log_delete("usuarios", u["id"], u)
+                        log_async("DELETE", "usuarios", u["id"], dados_anteriores=u)
                         repo.remover_usuario(u["id"])
+                        get_usuarios.clear()
                         st.rerun()
 
     st.markdown("---")
     st.markdown("### ➕ Adicionar Usuário")
 
-    with st.form("form_usuario"):
+    if "form_user_counter" not in st.session_state:
+        st.session_state["form_user_counter"] = 0
+
+    user_form_key = f"form_usuario_{st.session_state['form_user_counter']}"
+
+    with st.form(user_form_key):
         email = st.text_input("E-mail")
         col1, col2 = st.columns(2)
         with col1:
             role = st.selectbox("Role", ["viewer", "editor", "admin"])
         with col2:
-            trabalhadores_lista = repo.listar_trabalhadores(apenas_ativos=True)
+            trabalhadores_lista = get_trabalhadores(apenas_ativos=True)
             opcoes_trab = {"— Nenhum —": None}
             for t in trabalhadores_lista:
                 opcoes_trab[t["nome"]] = t["id"]
@@ -490,7 +678,9 @@ def aba_usuarios():
             trab_id = opcoes_trab[trab_nome]
 
         if st.form_submit_button("Criar usuário"):
-            if email:
+            if not email:
+                st.error("⚠️ E-mail é obrigatório!")
+            else:
                 senha_temp = gerar_senha_temporaria()
                 dados = {
                     "email": email.lower(),
@@ -501,12 +691,12 @@ def aba_usuarios():
                     "ativo": True,
                 }
                 novo_id = repo.adicionar_usuario(dados)
-                log.log_insert("usuarios", novo_id, {**dados, "senha_hash": "***"})
-
-                st.success(f"✅ Usuário criado!")
+                log_async("INSERT", "usuarios", novo_id, dados_novos={**dados, "senha_hash": "***"})
+                get_usuarios.clear()
+                st.session_state["form_user_counter"] += 1
+                st.success("✅ Usuário criado!")
                 st.info(f"**Senha temporária:** `{senha_temp}` — Anote e repasse ao usuário!")
-            else:
-                st.error("E-mail é obrigatório!")
+                st.rerun()
 
 
 # ============================================
@@ -518,13 +708,11 @@ def aba_dias_especiais():
     anos = [2026, 2027, 2028, 2029, 2030]
     ano = st.selectbox("Ano", anos, key="ano_dias")
 
-    dias = repo.listar_dias_especiais(ano=ano)
+    dias = get_dias_especiais(ano)
 
     if dias:
-        # Ordena por data
         dias_ordenados = sorted(dias, key=lambda d: d["data"])
 
-        # Agrupa por mês
         from collections import defaultdict
         por_mes = defaultdict(list)
         for d in dias_ordenados:
@@ -534,7 +722,6 @@ def aba_dias_especiais():
         MESES = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
                  "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
 
-        # Renderiza cada mês
         for mes_num in sorted(por_mes.keys()):
             mes_nome = MESES[mes_num - 1]
 
@@ -545,12 +732,10 @@ def aba_dias_especiais():
             )
 
             for d in por_mes[mes_num]:
-                # Formata data dd/mm/aaaa
-                data_fmt = d["data"]  # "2026-01-01"
+                data_fmt = d["data"]
                 ano_d, mes_d, dia_d = data_fmt.split("-")
                 data_br = f"{dia_d}/{mes_d}/{ano_d}"
 
-                # Busca o ato vinculado
                 ato = repo.buscar_ato_normativo(d.get("ato_normativo_id")) if d.get("ato_normativo_id") else None
 
                 cor_tipo = "#4caf50" if d["tipo"] == "Feriado" else "#f39c12"
@@ -572,11 +757,11 @@ def aba_dias_especiais():
                     if is_editor():
                         if st.button("🗑️", key=f"del_d_{d['id']}"):
                             repo.remover_dia_especial(d["id"])
+                            get_dias_especiais.clear()
                             st.rerun()
     else:
         st.info(f"Nenhum dia especial cadastrado para {ano}.")
 
-    # Adicionar manualmente (sem mudanças)
     if is_editor():
         st.markdown("---")
         st.markdown("### ➕ Adicionar Dia Especial")
@@ -599,138 +784,9 @@ def aba_dias_especiais():
                     "descricao": descricao,
                 }
                 repo.adicionar_dia_especial(dados)
+                get_dias_especiais.clear()
                 st.success("✅ Dia especial adicionado!")
                 st.rerun()
-
-# ============================================
-# ABA: LOGS (admin)
-# ============================================
-def aba_logs():
-    st.markdown("### 📝 Logs de Auditoria")
-
-    logs = repo.listar_logs(limite=200)
-
-    if logs:
-        for l in logs:
-            st.markdown(
-                f"**{l['timestamp'][:19]}** — `{l['usuario_email']}` — "
-                f"**{l['acao']}** em `{l['entidade']}` (ID: {l.get('entidade_id', '—')})"
-            )
-    else:
-        st.info("Nenhum log registrado.")
-
-
-# ============================================
-# MAIN
-# ============================================
-def main():
-    # Se não está logado
-    if not is_logado():
-        tela_login()
-        return
-
-    usuario = get_usuario_logado()
-
-    # Se senha temporária, força troca
-    if usuario.get("senha_temporaria"):
-        tela_troca_senha()
-        return
-
-    # Header
-    st.markdown('<h1 class="header-title">📋 COGSD Escala</h1>', unsafe_allow_html=True)
-    st.markdown(
-        f'<p class="header-subtitle">Logado como: {usuario["email"]} '
-        f'({get_role()})</p>', unsafe_allow_html=True
-    )
-    st.markdown("---")
-
-    # Sidebar
-    with st.sidebar:
-        st.markdown(f"### 👤 {usuario['email']}")
-        st.markdown(f"**Role:** {get_role()}")
-        st.markdown("---")
-
-        # Trocar senha
-        with st.expander("🔑 Trocar senha"):
-            with st.form("form_troca_senha_logado"):
-                senha_atual = st.text_input("Senha atual", type="password")
-                nova_senha = st.text_input("Nova senha", type="password")
-                confirmar = st.text_input("Confirmar nova senha", type="password")
-                trocar = st.form_submit_button("Trocar senha")
-
-                if trocar:
-                    if not verificar_senha(senha_atual, usuario["senha_hash"]):
-                        st.error("❌ Senha atual incorreta")
-                    elif len(nova_senha) < 6:
-                        st.error("Nova senha deve ter pelo menos 6 caracteres")
-                    elif nova_senha != confirmar:
-                        st.error("Senhas não coincidem")
-                    else:
-                        novo_hash = gerar_hash_senha(nova_senha)
-                        repo.atualizar_usuario(usuario["id"], senha_hash=novo_hash)
-                        log.registrar("UPDATE", "usuarios", usuario["id"],
-                                      None, {"acao": "troca_senha_propria"})
-                        st.success("✅ Senha alterada! Faça login novamente.")
-                        fazer_logout()
-                        st.rerun()
-
-        st.markdown("---")
-        if st.button("🚪 Sair", use_container_width=True):
-            log.log_logout(usuario["email"])
-            fazer_logout()
-            st.rerun()
-
-    # Tabs por role
-    if is_admin():
-        tabs = st.tabs(["📅 Escala", "👥 Trabalhadores", "⚠️ Ocorrências",
-                        "📆 Dias Especiais", "📜 Atos Normativos",
-                        "📊 Relatórios", "🔐 Usuários", "📝 Logs"])
-        (tab_escala, tab_trab, tab_ocorr, tab_dias,
-         tab_atos, tab_rel, tab_users, tab_logs) = tabs
-
-        with tab_escala:
-            aba_escala()
-        with tab_trab:
-            aba_trabalhadores()
-        with tab_ocorr:
-            st.info("Em breve (Fase 2)")
-        with tab_dias:
-            aba_dias_especiais()
-        with tab_atos:
-            aba_atos_normativos()
-        with tab_rel:
-            st.info("Em breve (Fase 3)")
-        with tab_users:
-            aba_usuarios()
-        with tab_logs:
-            aba_logs()
-
-    elif is_editor():
-        tabs = st.tabs(["📅 Escala", "👥 Trabalhadores", "⚠️ Ocorrências",
-                        "📆 Dias Especiais", "📊 Relatórios"])
-        tab_escala, tab_trab, tab_ocorr, tab_dias, tab_rel = tabs
-
-        with tab_escala:
-            aba_escala()
-        with tab_trab:
-            aba_trabalhadores()
-        with tab_ocorr:
-            st.info("Em breve (Fase 2)")
-        with tab_dias:
-            aba_dias_especiais()
-        with tab_rel:
-            st.info("Em breve (Fase 3)")
-
-    else:  # viewer
-        tabs = st.tabs(["📅 Escala", "👥 Trabalhadores", "📊 Relatórios"])
-        tab_escala, tab_trab, tab_rel = tabs
-
-        with tab_escala:
-            aba_escala()
-        with tab_trab:
-            aba_trabalhadores()
-        with tab_rel:
-            st.info("Em breve (Fase 3)")
 
 
 # ============================================
@@ -744,11 +800,10 @@ def aba_atos_normativos():
         "será desativado automaticamente."
     )
 
-    # Lista atos existentes
     anos_disponiveis = [2026, 2027, 2028, 2029, 2030]
     ano_filtro = st.selectbox("Filtrar por ano", ["Todos"] + anos_disponiveis, key="ano_ato")
 
-    atos = repo.listar_atos_normativos(
+    atos = get_atos_normativos(
         ano=ano_filtro if ano_filtro != "Todos" else None,
         apenas_ativos=False
     )
@@ -772,21 +827,19 @@ def aba_atos_normativos():
                 st.markdown(status)
 
             with col3:
-                # Contar dias associados
                 dias_ato = repo.listar_dias_especiais(ato_id=ato["id"])
                 st.markdown(f"**{len(dias_ato)} dias**")
 
             with col4:
                 if ato.get("ativo") and is_admin():
                     if st.button("🗑️ Remover", key=f"rm_ato_{ato['id']}"):
-                        # Desativa ato
                         repo.desativar_ato_normativo(ato["id"])
-                        # Remove os dias associados
                         repo.remover_dias_por_ato(ato["id"])
-                        # Remove PDF
                         if ato.get("arquivo_url"):
                             repo.remover_pdf_ato(ato["arquivo_url"])
-                        log.log_delete("atos_normativos", ato["id"], ato)
+                        log_async("DELETE", "atos_normativos", ato["id"], dados_anteriores=ato)
+                        get_atos_normativos.clear()
+                        get_dias_especiais.clear()
                         st.success("Ato removido!")
                         st.rerun()
     else:
@@ -814,11 +867,9 @@ def aba_atos_normativos():
         st.markdown("**Datas especiais** (adicione manualmente):")
         st.caption("Opcionalmente, você pode adicionar as datas manualmente abaixo.")
 
-        # Permite adicionar N datas
         num_datas = st.number_input("Quantas datas adicionar?",
                                     min_value=0, max_value=50, value=0)
 
-        # Cria campos dinâmicos
         datas_input = []
         for i in range(int(num_datas)):
             st.markdown(f"**Data {i + 1}:**")
@@ -839,9 +890,7 @@ def aba_atos_normativos():
             if not titulo:
                 st.error("Título é obrigatório!")
             else:
-                # Verifica se já existe ato ativo para o ano
                 atos_ano = repo.listar_atos_normativos(ano=ano, apenas_ativos=True)
-                substituiu = None
 
                 if atos_ano:
                     st.warning(
@@ -849,7 +898,6 @@ def aba_atos_normativos():
                         f"O ato anterior será desativado automaticamente."
                     )
 
-                # Upload do PDF
                 arquivo_url = None
                 if pdf:
                     try:
@@ -857,7 +905,6 @@ def aba_atos_normativos():
                     except Exception as e:
                         st.error(f"Erro no upload: {e}")
 
-                # Cria o ato
                 dados_ato = {
                     "ano": ano,
                     "titulo": titulo,
@@ -868,16 +915,14 @@ def aba_atos_normativos():
                     "created_by": get_usuario_logado().get("email", ""),
                 }
                 ato_id = repo.adicionar_ato_normativo(dados_ato)
-                log.log_insert("atos_normativos", ato_id, dados_ato)
+                log_async("INSERT", "atos_normativos", ato_id, dados_novos=dados_ato)
 
-                # Desativa atos anteriores
                 if atos_ano:
                     for ato_ant in atos_ano:
                         repo.desativar_ato_normativo(ato_ant["id"], substituido_por=ato_id)
-                        log.log_update("atos_normativos", ato_ant["id"],
-                                       ato_ant, {**ato_ant, "ativo": False})
+                        log_async("UPDATE", "atos_normativos", ato_ant["id"],
+                                  dados_anteriores=ato_ant, dados_novos={**ato_ant, "ativo": False})
 
-                # Adiciona as datas
                 for d, t, desc in datas_input:
                     dados_dia = {
                         "data": d.isoformat(),
@@ -887,11 +932,158 @@ def aba_atos_normativos():
                     }
                     repo.adicionar_dia_especial(dados_dia)
 
+                get_atos_normativos.clear()
+                get_dias_especiais.clear()
                 st.success(
                     f"✅ Ato normativo salvo! "
                     f"{len(datas_input)} datas adicionadas."
                 )
                 st.rerun()
+
+
+# ============================================
+# ABA: LOGS (admin)
+# ============================================
+def aba_logs():
+    st.markdown("### 📝 Logs de Auditoria")
+
+    logs = repo.listar_logs(limite=200)
+
+    if logs:
+        for l in logs:
+            st.markdown(
+                f"**{l['timestamp'][:19]}** — `{l['usuario_email']}` — "
+                f"**{l['acao']}** em `{l['entidade']}` (ID: {l.get('entidade_id', '—')})"
+            )
+    else:
+        st.info("Nenhum log registrado.")
+
+
+# ============================================
+# MAIN
+# ============================================
+def main():
+    processar_logs_pendentes()
+
+    if not is_logado():
+        tela_login()
+        return
+
+    usuario = get_usuario_logado()
+
+    if usuario.get("senha_temporaria"):
+        tela_troca_senha()
+        return
+
+    st.markdown('<h1 class="header-title">📋 COGSD Escala</h1>', unsafe_allow_html=True)
+    st.markdown(
+        f'<p class="header-subtitle">Logado como: {usuario["email"]} '
+        f'({get_role()})</p>', unsafe_allow_html=True
+    )
+    st.markdown("---")
+
+    with st.sidebar:
+        st.markdown(f"### 👤 {usuario['email']}")
+        st.markdown(f"**Role:** {get_role()}")
+        st.markdown("---")
+
+        with st.expander("🔑 Trocar senha"):
+            with st.form("form_troca_senha_logado"):
+                senha_atual = st.text_input("Senha atual", type="password")
+                nova_senha = st.text_input("Nova senha", type="password")
+                confirmar = st.text_input("Confirmar nova senha", type="password")
+                trocar = st.form_submit_button("Trocar senha")
+
+                if trocar:
+                    if not verificar_senha(senha_atual, usuario["senha_hash"]):
+                        st.error("❌ Senha atual incorreta")
+                    elif len(nova_senha) < 6:
+                        st.error("Nova senha deve ter pelo menos 6 caracteres")
+                    elif nova_senha != confirmar:
+                        st.error("Senhas não coincidem")
+                    else:
+                        novo_hash = gerar_hash_senha(nova_senha)
+                        repo.atualizar_usuario(usuario["id"], senha_hash=novo_hash)
+                        log.registrar("UPDATE", "usuarios", usuario["id"],
+                                      None, {"acao": "troca_senha_propria"})
+                        st.success("✅ Senha alterada! Faça login novamente.")
+                        fazer_logout()
+                        st.rerun()
+
+        if st.button("🔄 Recarregar", use_container_width=True):
+            limpar_cache()
+            st.rerun()
+
+        if st.button("🚪 Sair", use_container_width=True):
+            log_async("LOGOUT", "usuarios", dados_novos={"email": usuario["email"]})
+            processar_logs_pendentes()
+            fazer_logout()
+            st.rerun()
+
+    # ============================================
+    # TABS POR ROLE
+    # ============================================
+    if is_admin():
+        # ADMIN: vê tudo
+        tabs = st.tabs([
+            "📅 Escala",
+            "👥 Trabalhadores",
+            "⚠️ Ocorrências",
+            "📆 Dias Especiais",
+            "📜 Atos Normativos",
+            "📊 Relatórios",
+            "🔐 Usuários",
+            "📝 Logs",
+        ])
+        (tab_escala, tab_trab, tab_ocorr, tab_dias,
+         tab_atos, tab_rel, tab_users, tab_logs) = tabs
+
+        with tab_escala:
+            aba_escala()
+        with tab_trab:
+            aba_trabalhadores()
+        with tab_ocorr:
+            st.info("Em breve (Fase 2)")
+        with tab_dias:
+            aba_dias_especiais()
+        with tab_atos:
+            aba_atos_normativos()
+        with tab_rel:
+            st.info("Em breve (Fase 3)")
+        with tab_users:
+            aba_usuarios()
+        with tab_logs:
+            aba_logs()
+
+    elif is_editor():
+        # EDITOR: vê Escala, Dias Especiais, Atos Normativos e Relatórios
+        tabs = st.tabs([
+            "📅 Escala",
+            "📆 Dias Especiais",
+            "📜 Atos Normativos",
+            "📊 Relatórios",
+        ])
+        tab_escala, tab_dias, tab_atos, tab_rel = tabs
+
+        with tab_escala:
+            aba_escala()
+        with tab_dias:
+            aba_dias_especiais()
+        with tab_atos:
+            aba_atos_normativos()
+        with tab_rel:
+            st.info("Em breve (Fase 3)")
+
+    else:
+        # VIEWER: vê apenas Escala e Relatórios
+        tabs = st.tabs(["📅 Escala", "📊 Relatórios"])
+        tab_escala, tab_rel = tabs
+
+        with tab_escala:
+            aba_escala()
+        with tab_rel:
+            st.info("Em breve (Fase 3)")
+
 
 if __name__ == "__main__":
     main()
